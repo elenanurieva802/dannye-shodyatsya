@@ -1,0 +1,76 @@
+name: Deploy website
+run-name: "${{ inputs.operation }} website — @${{ github.actor }}"
+
+on:
+  workflow_dispatch:
+    inputs:
+      operation:
+        description: 'deploy — опубликовать main; rollback — вернуть предыдущую версию'
+        required: true
+        type: choice
+        default: deploy
+        options:
+          - deploy
+          - rollback
+
+permissions:
+  contents: read
+
+concurrency:
+  group: vibe-seller-production
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    env:
+      OPERATION: ${{ inputs.operation }}
+      REVISION: ${{ github.sha }}
+    steps:
+      - name: Configure restricted SSH access
+        env:
+          DEPLOY_KEY: ${{ secrets.VIBE_DEPLOY_KEY }}
+          KNOWN_HOSTS: ${{ secrets.VIBE_KNOWN_HOSTS }}
+        run: |
+          set -euo pipefail
+          test -n "$DEPLOY_KEY" && test -n "$KNOWN_HOSTS"
+          umask 077
+          mkdir -p "$HOME/.ssh"
+          printf '%s\n' "$DEPLOY_KEY" > "$HOME/.ssh/vibe_deploy"
+          printf '%s\n' "$KNOWN_HOSTS" > "$HOME/.ssh/known_hosts"
+
+      - name: Publish or restore previous version
+        run: |
+          set -euo pipefail
+          case "$OPERATION" in
+            deploy) [[ "$REVISION" =~ ^[0-9a-f]{40}$ ]]; command="deploy $REVISION" ;;
+            rollback) command=rollback ;;
+            *) echo 'Unsupported operation'; exit 1 ;;
+          esac
+          ssh -T -i "$HOME/.ssh/vibe_deploy" \
+            -o BatchMode=yes -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes \
+            -o ConnectTimeout=15 vibe-deploy@31.177.108.158 "$command" | tee "$RUNNER_TEMP/vibe-result.txt"
+
+      - name: Verify public website
+        run: |
+          set -euo pipefail
+          expected=$(sed -n 's/^SHA256: //p' "$RUNNER_TEMP/vibe-result.txt")
+          [[ "$expected" =~ ^[0-9a-f]{64}$ ]]
+          actual=$(curl --fail --silent --show-error --max-time 30 https://vibe-seller.ru/ | sha256sum | cut -d ' ' -f 1)
+          test "$actual" = "$expected"
+          redirect=$(curl --silent --show-error --output /dev/null --write-out '%{http_code} %{redirect_url}' --max-time 20 https://www.vibe-seller.ru/)
+          test "$redirect" = '301 https://vibe-seller.ru/'
+          {
+            echo '### Сайт опубликован'
+            echo 'https://vibe-seller.ru'
+            echo "Операция: $OPERATION"
+            echo '```'
+            cat "$RUNNER_TEMP/vibe-result.txt"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Remove temporary SSH key
+        if: always()
+        run: rm -f "$HOME/.ssh/vibe_deploy"
