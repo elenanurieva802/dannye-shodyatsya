@@ -58,9 +58,11 @@ jobs:
           set -euo pipefail
           expected=$(sed -n 's/^SHA256: //p' "$RUNNER_TEMP/vibe-result.txt")
           [[ "$expected" =~ ^[0-9a-f]{64}$ ]]
-          actual=$(curl --fail --silent --show-error --max-time 30 https://vibe-seller.ru/ | sha256sum | cut -d ' ' -f 1)
+          curl --fail --silent --show-error --retry 3 --retry-all-errors --retry-delay 2 \
+            --connect-timeout 10 --max-time 45 https://vibe-seller.ru/ -o "$RUNNER_TEMP/vibe-page.html"
+          actual=$(sha256sum "$RUNNER_TEMP/vibe-page.html" | cut -d ' ' -f 1)
           test "$actual" = "$expected"
-          redirect=$(curl --silent --show-error --output /dev/null --write-out '%{http_code} %{redirect_url}' --max-time 20 https://www.vibe-seller.ru/)
+          redirect=$(curl --silent --show-error --retry 2 --retry-all-errors --retry-delay 2 --connect-timeout 10 --max-time 20 --output /dev/null --write-out '%{http_code} %{redirect_url}' https://www.vibe-seller.ru/)
           test "$redirect" = '301 https://vibe-seller.ru/'
           {
             echo '### Сайт опубликован'
